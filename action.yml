@@ -1,0 +1,132 @@
+name: Schema drift check
+description: >-
+  Applies the migrations and the sqlc schema snapshot to two fresh databases,
+  dumps both with pg_dump and reports every difference.
+author: Hatchet
+
+branding:
+  icon: git-compare
+  color: purple
+
+inputs:
+  schema-files:
+    description: >-
+      Schema snapshot files to apply, one per line, in the order sqlc reads
+      them. Paths are relative to working-directory.
+    required: true
+  migrations-dir:
+    description: >-
+      Directory of goose SQL migrations. goose is installed and `goose up` is
+      run against the migrations database. Use migrate-command instead when
+      the migrations include Go migrations or other steps goose alone cannot
+      replay.
+    required: false
+    default: ""
+  migrate-command:
+    description: >-
+      Shell command that applies the migrations, for example
+      `go run ./cmd/hatchet-migrate`. It runs in working-directory with the
+      migrations database URL in the environment variable named by
+      database-url-env. Exactly one of migrations-dir and migrate-command is
+      required.
+    required: false
+    default: ""
+  database-url-env:
+    description: Environment variable that carries the database URL to migrate-command.
+    required: false
+    default: DATABASE_URL
+  postgres-image:
+    description: >-
+      Docker image for the Postgres server the action starts, for example
+      postgres:16 or timescale/timescaledb-ha:pg15. Ignored when database-url
+      is set.
+    required: false
+    default: postgres:16
+  database-url:
+    description: >-
+      Use this existing server instead of starting a container. The role must
+      be allowed to create databases; psql and pg_dump must be on PATH.
+    required: false
+    default: ""
+  goose-version:
+    description: goose release to install when migrations-dir is used.
+    required: false
+    default: v3.29.0
+  goose-table:
+    description: Name of goose's version table, excluded from the comparison.
+    required: false
+    default: goose_db_version
+  exclude-schemas:
+    description: >-
+      Comma-separated pg_dump schema patterns to leave out of the comparison
+      (for example `outbox` for pgoutbox). TimescaleDB's own schemas are
+      always excluded.
+    required: false
+    default: ""
+  exclude-tables:
+    description: Comma-separated pg_dump table patterns to leave out of the comparison.
+    required: false
+    default: ""
+  fail-on-drift:
+    description: Fail the step when the snapshot and the migrations differ.
+    required: false
+    default: "true"
+  working-directory:
+    description: Directory the paths and migrate-command are relative to.
+    required: false
+    default: "."
+  name:
+    description: Label for the report, for example `sql/schema`.
+    required: false
+    default: schema
+
+outputs:
+  drifted:
+    description: "`true` when the snapshot and the migrations differ."
+    value: ${{ steps.check.outputs.drifted }}
+  report:
+    description: Path of the Markdown report.
+    value: ${{ steps.check.outputs.report }}
+  diff:
+    description: Path of the unified diff (empty file when nothing differs).
+    value: ${{ steps.check.outputs.diff }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install goose
+      if: inputs.migrations-dir != ''
+      shell: bash
+      env:
+        GOOSE_VERSION: ${{ inputs.goose-version }}
+      run: |
+        set -euo pipefail
+        if command -v goose >/dev/null 2>&1; then
+          echo "using $(goose --version)"
+          exit 0
+        fi
+        install_dir="${RUNNER_TEMP:-/tmp}/goose"
+        mkdir -p "$install_dir"
+        curl -fsSL https://raw.githubusercontent.com/pressly/goose/master/install.sh \
+          | GOOSE_INSTALL="$install_dir" sh -s "$GOOSE_VERSION"
+        echo "$install_dir/bin" >> "$GITHUB_PATH"
+        "$install_dir/bin/goose" --version
+
+    - name: Check schema drift
+      id: check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SD_SCHEMA_FILES: ${{ inputs.schema-files }}
+        SD_MIGRATIONS_DIR: ${{ inputs.migrations-dir }}
+        SD_MIGRATE_COMMAND: ${{ inputs.migrate-command }}
+        SD_DATABASE_URL_ENV: ${{ inputs.database-url-env }}
+        SD_POSTGRES_IMAGE: ${{ inputs.postgres-image }}
+        SD_DATABASE_URL: ${{ inputs.database-url }}
+        SD_GOOSE_TABLE: ${{ inputs.goose-table }}
+        SD_EXCLUDE_SCHEMAS: ${{ inputs.exclude-schemas }}
+        SD_EXCLUDE_TABLES: ${{ inputs.exclude-tables }}
+        SD_FAIL_ON_DRIFT: ${{ inputs.fail-on-drift }}
+        SD_NAME: ${{ inputs.name }}
+        SD_REPORT_DIR: ${{ runner.temp }}/schema-drift
+      run: bash "$GITHUB_ACTION_PATH/scripts/check.sh"

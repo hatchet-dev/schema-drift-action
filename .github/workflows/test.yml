@@ -1,0 +1,116 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  goose-matches:
+    name: goose, snapshot matches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./
+        with:
+          name: fixtures (goose)
+          schema-files: fixtures/schema.sql
+          migrations-dir: fixtures/migrations
+
+  goose-drift:
+    name: goose, snapshot drifted
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - id: check
+        uses: ./
+        with:
+          name: fixtures (drifted)
+          schema-files: fixtures/schema-drifted.sql
+          migrations-dir: fixtures/migrations
+          fail-on-drift: "false"
+      - name: The drift was reported
+        env:
+          DRIFTED: ${{ steps.check.outputs.drifted }}
+          DIFF: ${{ steps.check.outputs.diff }}
+        run: |
+          set -euo pipefail
+          test "$DRIFTED" = "true"
+          grep -q '^+CREATE INDEX widget_status_idx' "$DIFF"
+          grep -q '^-    description text NOT NULL' "$DIFF"
+          grep -q '^+    description text$' "$DIFF"
+
+  goose-drift-fails:
+    name: goose, drift fails the step
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - id: check
+        continue-on-error: true
+        uses: ./
+        with:
+          schema-files: fixtures/schema-drifted.sql
+          migrations-dir: fixtures/migrations
+      - name: The step failed
+        run: test "${{ steps.check.outcome }}" = "failure"
+
+  invalid-snapshot:
+    name: snapshot that does not apply
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - id: check
+        continue-on-error: true
+        uses: ./
+        with:
+          schema-files: fixtures/schema-invalid.sql
+          migrations-dir: fixtures/migrations
+          fail-on-drift: "false"
+      - name: The step failed and said why
+        env:
+          REPORT: ${{ steps.check.outputs.report }}
+        run: |
+          set -euo pipefail
+          test "${{ steps.check.outcome }}" = "failure"
+          grep -q 'not valid SQL on its own' "$REPORT"
+
+  migrate-command:
+    name: migrate command, several snapshot files, Postgres 15
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Split the snapshot in two files
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/split"
+          sed -n '1,/^CREATE INDEX widget_status_idx/p' fixtures/schema.sql > "$RUNNER_TEMP/split/a.sql"
+          sed -n '/^CREATE INDEX widget_status_idx/,$p' fixtures/schema.sql | tail -n +2 > "$RUNNER_TEMP/split/b.sql"
+      - uses: ./
+        with:
+          name: fixtures (migrate command)
+          schema-files: |
+            ${{ runner.temp }}/split/a.sql
+            ${{ runner.temp }}/split/b.sql
+          migrate-command: go run github.com/pressly/goose/v3/cmd/goose@v3.29.0 -dir fixtures/migrations postgres "$MIGRATIONS_URL" up
+          database-url-env: MIGRATIONS_URL
+          postgres-image: postgres:15
+
+  timescaledb:
+    name: goose on timescale/timescaledb-ha
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./
+        with:
+          name: fixtures (TimescaleDB)
+          schema-files: fixtures/schema.sql
+          migrations-dir: fixtures/migrations
+          postgres-image: timescale/timescaledb-ha:pg15
